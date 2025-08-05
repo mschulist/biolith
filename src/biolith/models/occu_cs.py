@@ -84,25 +84,25 @@ def occu_cs(
     """
 
     # Check input data
-    assert (
-        obs is None or obs.ndim == 2
-    ), "obs must be None or of shape (n_sites, time_periods)"
+    assert obs is None or obs.ndim == 2, (
+        "obs must be None or of shape (n_sites, time_periods)"
+    )
     assert site_covs.ndim == 2, "site_covs must be of shape (n_sites, n_site_covs)"
-    assert (
-        obs_covs.ndim == 3
-    ), "obs_covs must be of shape (n_sites, time_periods, n_obs_covs)"
+    assert obs_covs.ndim == 3, (
+        "obs_covs must be of shape (n_sites, time_periods, n_obs_covs)"
+    )
 
     n_sites = site_covs.shape[0]
     time_periods = obs_covs.shape[1]
     n_site_covs = site_covs.shape[1]
     n_obs_covs = obs_covs.shape[2]
 
-    assert (
-        n_sites == site_covs.shape[0] == obs_covs.shape[0]
-    ), "site_covs and obs_covs must have the same number of sites"
-    assert (
-        time_periods == obs_covs.shape[1]
-    ), "obs_covs must have the same number of time periods as obs"
+    assert n_sites == site_covs.shape[0] == obs_covs.shape[0], (
+        "site_covs and obs_covs must have the same number of sites"
+    )
+    assert time_periods == obs_covs.shape[1], (
+        "obs_covs must have the same number of time periods as obs"
+    )
     if obs is not None:
         assert n_sites == obs.shape[0], "obs must have n_sites rows"
         assert time_periods == obs.shape[1], "obs must have time_periods columns"
@@ -151,7 +151,6 @@ def occu_cs(
     obs = obs.transpose((1, 0)) if obs is not None else None
 
     with numpyro.plate("site", n_sites, dim=-1):
-
         # Site-level random effects
         if site_random_effects:
             site_re_occ = numpyro.sample("site_re_occ", dist.Normal(0, site_re_sd))  # type: ignore
@@ -166,11 +165,12 @@ def occu_cs(
             jax.nn.sigmoid(reg_occ(site_covs) + w + site_re_occ),
         )
         z = numpyro.sample(
-            "z", dist.Bernoulli(probs=psi), infer={"enumerate": "parallel"}  # type: ignore
+            "z",
+            dist.Bernoulli(probs=psi),
+            infer={"enumerate": "parallel"},  # type: ignore
         )
 
         with numpyro.plate("time_periods", time_periods, dim=-2):
-
             # Observation-level random effects
             if obs_random_effects:
                 obs_re = numpyro.sample("obs_re", dist.Normal(0, obs_re_sd))  # type: ignore
@@ -180,7 +180,9 @@ def occu_cs(
             # Detection process
             f = numpyro.sample(
                 "f",
-                dist.Bernoulli(z * jax.nn.sigmoid(reg_det(obs_covs) + site_re_det + obs_re)),  # type: ignore
+                dist.Bernoulli(
+                    z * jax.nn.sigmoid(reg_det(obs_covs) + site_re_det + obs_re)
+                ),  # type: ignore
                 infer={"enumerate": "parallel"},
             )
 
@@ -189,7 +191,8 @@ def occu_cs(
                     numpyro.sample(
                         "s",
                         dist.Normal(
-                            (1 - f) * mu0 + f * mu1, (1 - f) * sigma0 + f * sigma1  # type: ignore
+                            (1 - f) * mu0 + f * mu1,
+                            (1 - f) * sigma0 + f * sigma1,  # type: ignore
                         ),  # type: ignore
                         obs=jnp.nan_to_num(obs),
                     )
@@ -236,7 +239,6 @@ def simulate_cs(
     # Make sure occupancy and detection are not too close to 0 or 1
     z = None
     while z is None or z.mean() < min_occupancy or z.mean() > max_occupancy:
-
         # Generate intercept and slopes
         beta = rng.normal(
             size=n_site_covs + 1
@@ -339,7 +341,6 @@ def simulate_cs(
 
 
 class TestOccuCS(unittest.TestCase):
-
     def test_occu(self):
         data, true_params = simulate_cs(simulate_missing=True)
 

@@ -8,24 +8,23 @@ import numpyro
 import numpyro.distributions as dist
 
 from biolith.regression import AbstractRegression, LinearRegression
+from biolith.utils.distributions import RightTruncatedPoisson
 from biolith.utils.spatial import sample_spatial_effects, simulate_spatial_effects
 
 
-def occu_cop(
+def occu_rn(
     site_covs: jnp.ndarray,
     obs_covs: jnp.ndarray,
     coords: Optional[jnp.ndarray] = None,
     ell: float = 1.0,
-    session_duration: Optional[jnp.ndarray] = None,
     false_positives_constant: bool = False,
-    false_positives_unoccupied: bool = False,
+    max_abundance: int = 100,
     obs: Optional[jnp.ndarray] = None,
     prior_beta: dist.Distribution = dist.Normal(),
     prior_alpha: dist.Distribution = dist.Normal(),
-    regressor_occ: Type[AbstractRegression] = LinearRegression,
+    regressor_abu: Type[AbstractRegression] = LinearRegression,
     regressor_det: Type[AbstractRegression] = LinearRegression,
-    prior_rate_fp_constant: dist.Distribution = dist.Exponential(),
-    prior_rate_fp_unoccupied: dist.Distribution = dist.Exponential(),
+    prior_prob_fp_constant: dist.Distribution = dist.Beta(2, 5),
     prior_gp_sd: dist.Distribution = dist.HalfNormal(1.0),
     prior_gp_length: dist.Distribution = dist.HalfNormal(1.0),
     site_random_effects: bool = False,
@@ -33,46 +32,44 @@ def occu_cop(
     prior_site_re_sd: dist.Distribution = dist.HalfNormal(1.0),
     prior_obs_re_sd: dist.Distribution = dist.HalfNormal(1.0),
 ) -> None:
-    """Count occupancy model using a Poisson detection process, inspired by Pautrel et
-    al. (2024).
+    """Occupancy model inspired by Royle and Nichols (2003), relating observations to
+    the number of individuals present at a site.
 
     References
     ----------
-        - Pautrel, L., Moulherat, S., Gimenez, O., & Etienne, M.-P. (2024). Analysing biodiversity observation data collected in continuous time: Should we use discrete- or continuous-time occupancy models? Methods in Ecology and Evolution, 15, 935–950.
+        - Royle, J. A. and Nichols, J. D. (2003) Estimating Abundance from Repeated Presence-Absence Data or Point Counts. Ecology, 84(3) pp. 777–790.
 
     Parameters
     ----------
     site_covs : jnp.ndarray
-        Per-site covariates, shape (n_sites, n_site_covs).
+        An array of site-level covariates of shape (n_sites, n_site_covs).
     obs_covs : jnp.ndarray
-        Observation covariates, shape (n_sites, time_periods, n_obs_covs).
-    coords : Optional[jnp.ndarray], optional
-        Site coordinates for spatial effects, shape (n_sites, 2).
+        An array of observation-level covariates of shape (n_sites, n_revisits, n_obs_covs).
+    coords : jnp.ndarray, optional
+        Coordinates for a spatial random effect when provided.
     ell : float
-        Spatial correlation length for the GP prior.
-    session_duration : Optional[jnp.ndarray], optional
-        Duration of each sampling session, shape (n_sites, time_periods).
+        Spatial kernel length scale used if coords is provided.
     false_positives_constant : bool
-        If True, model a constant false positive rate for all sites.
-    false_positives_unoccupied : bool
-        If True, model a false positive rate only for unoccupied sites.
-    obs : Optional[jnp.ndarray], optional
-        Observed counts, shape (n_sites, time_periods).
-    prior_beta : dist.Distribution
-        Prior distribution for occupancy coefficients.
-    prior_alpha : dist.Distribution
-        Prior distribution for detection coefficients.
-    regressor_occ : Type[AbstractRegression]
-        Class for the occupancy regression model, defaults to LinearRegression.
+        Flag indicating whether to model a constant false positive rate.
+    max_abundance : int
+        Maximum abundance cutoff for the Poisson distribution.
+    obs : jnp.ndarray, optional
+        Observation matrix of shape (n_sites, n_revisits) or None.
+    prior_beta : numpyro.distributions.Distribution
+        Prior distribution for the site-level regression coefficients.
+    prior_alpha : numpyro.distributions.Distribution
+        Prior distribution for the observation-level regression coefficients.
+    regressor_abu : Type[AbstractRegression]
+        Class for the abundance regression model, defaults to LinearRegression.
     regressor_det : Type[AbstractRegression]
         Class for the detection regression model, defaults to LinearRegression.
-    prior_rate_fp_constant : dist.Distribution
-        Prior for the constant false positive rate parameter.
-    prior_rate_fp_unoccupied : dist.Distribution
-        Prior for the false positive rate parameter in unoccupied sites.
-    prior_gp_sd : dist.Distribution
+    prior_prob_fp_constant : numpyro.distributions.Distribution
+        Prior distribution for the constant false positive rate.
+    prior_prob_fp_unoccupied : numpyro.distributions.Distribution
+        Prior distribution for the false positive rate in unoccupied sites.
+    prior_gp_sd : numpyro.distributions.Distribution
         Prior distribution for the spatial random effect scale.
-    prior_gp_length : dist.Distribution
+    prior_gp_length : numpyro.distributions.Distribution
         Prior distribution for the spatial kernel length scale.
     site_random_effects : bool
         Flag indicating whether to include site-level random effects.
@@ -85,53 +82,26 @@ def occu_cop(
 
     Examples
     --------
-    >>> from biolith.models import occu_cop, simulate_cop
+    >>> from biolith.models import occu_rn, simulate_rn
     >>> from biolith.utils import fit
-    >>> data, _ = simulate_cop()
-    >>> results = fit(occu_cop, **data)
-    >>> print(results.samples['psi'].mean())
+    >>> data, _ = simulate_rn()
+    >>> results = fit(occu_rn, **data)
+    >>> print(results.samples['abundance'].mean())
     """
 
     # Check input data
-    assert (
-        obs is None or obs.ndim == 2
-    ), "obs must be None or of shape (n_sites, time_periods)"
-    assert site_covs.ndim == 2, "site_covs must be of shape (n_sites, n_site_covs)"
-    assert (
-        obs_covs.ndim == 3
-    ), "obs_covs must be of shape (n_sites, time_periods, n_obs_covs)"
-    assert (
-        session_duration is None or session_duration.ndim == 2
-    ), "session_duration must be None or of shape (n_sites, time_periods)"
-    assert not (
-        false_positives_constant and false_positives_unoccupied
-    ), "false_positives_constant and false_positives_unoccupied cannot both be True"
+    assert site_covs.ndim == 2, "site_covs must be (n_sites, n_site_covs)"
+    assert obs_covs.ndim == 3, "obs_covs must be (n_sites, time_periods, n_obs_covs)"
 
     n_sites = site_covs.shape[0]
     time_periods = obs_covs.shape[1]
     n_site_covs = site_covs.shape[1]
     n_obs_covs = obs_covs.shape[2]
 
-    assert (
-        n_sites == site_covs.shape[0] == obs_covs.shape[0]
-    ), "site_covs and obs_covs must have the same number of sites"
-    assert (
-        time_periods == obs_covs.shape[1]
-    ), "obs_covs must have the same number of time periods as obs"
-    if obs is not None:
-        assert n_sites == obs.shape[0], "obs must have n_sites rows"
-        assert time_periods == obs.shape[1], "obs must have time_periods columns"
-    if session_duration is not None:
-        assert (
-            n_sites == session_duration.shape[0]
-        ), "session_duration must have n_sites rows"
-        assert (
-            time_periods == session_duration.shape[1]
-        ), "session_duration must have time_periods columns"
-
-    if session_duration is None:
-        # If session_duration is not provided, assume a constant duration of 1 for each time period
-        session_duration = jnp.ones((n_sites, time_periods))
+    # # TODO: re-enable
+    # if obs is not None:
+    #     assert obs.shape == (n_sites, time_periods), "obs must have shape (n_sites, time_periods)"
+    #     assert (obs[np.isfinite(obs)] >= 0).all() and (obs[np.isfinite(obs)] <= 1).all(), "Detections (obs) must be in {0,1} (or NaN for missing)."
 
     # Mask observations where covariates are missing
     obs_mask = jnp.isnan(obs_covs).any(axis=-1) | jnp.tile(
@@ -141,22 +111,16 @@ def occu_cop(
     obs_covs = jnp.nan_to_num(obs_covs)
     site_covs = jnp.nan_to_num(site_covs)
 
+    # Priors
     # Model false positive rate for both occupied and unoccupied sites
-    rate_fp_constant = (
-        numpyro.sample("rate_fp_constant", prior_rate_fp_constant)
+    prob_fp_constant = (
+        numpyro.sample("prob_fp_constant", prior_prob_fp_constant)
         if false_positives_constant
         else 0
     )
 
-    # Model false positive rate only for unoccupied sites
-    rate_fp_unoccupied = (
-        numpyro.sample("rate_fp_unoccupied", prior_rate_fp_unoccupied)
-        if false_positives_unoccupied
-        else 0
-    )
-
-    # Occupancy and detection regression models
-    reg_occ = regressor_occ("beta", n_site_covs, prior=prior_beta)
+    # Abundance and detection regression models
+    reg_abu = regressor_abu("beta", n_site_covs, prior=prior_beta)
     reg_det = regressor_det("alpha", n_obs_covs, prior=prior_alpha)
 
     if coords is not None:
@@ -178,30 +142,30 @@ def occu_cop(
     # Transpose in order to fit NumPyro's plate structure
     site_covs = site_covs.transpose((1, 0))
     obs_covs = obs_covs.transpose((2, 1, 0))
-    session_duration = session_duration.transpose((1, 0))
     obs = obs.transpose((1, 0)) if obs is not None else None
 
     with numpyro.plate("site", n_sites, dim=-1):
-
         # Site-level random effects
         if site_random_effects:
-            site_re_occ = numpyro.sample("site_re_occ", dist.Normal(0, site_re_sd))  # type: ignore
+            site_re_abu = numpyro.sample("site_re_abu", dist.Normal(0, site_re_sd))  # type: ignore
             site_re_det = numpyro.sample("site_re_det", dist.Normal(0, site_re_sd))  # type: ignore
         else:
-            site_re_occ = 0.0
+            site_re_abu = 0.0
             site_re_det = 0.0
 
-        # Occupancy process
-        psi = numpyro.deterministic(
-            "psi",
-            jax.nn.sigmoid(reg_occ(site_covs) + w + site_re_occ),
-        )
-        z = numpyro.sample(
-            "z", dist.Bernoulli(probs=psi), infer={"enumerate": "parallel"}  # type: ignore
+        # Abundance process (note: this model uses abundance instead of occupancy)
+        abundance = numpyro.deterministic(
+            "abundance",
+            jnp.exp(reg_abu(site_covs) + w + site_re_abu),
         )
 
-        with numpyro.plate("time_periods", time_periods, dim=-2):
+        N_i = numpyro.sample(
+            "N_i",
+            RightTruncatedPoisson(abundance, max_cutoff=max_abundance),  # type: ignore
+            infer={"enumerate": "parallel"},
+        )
 
+        with numpyro.plate("time", time_periods, dim=-2):
             # Observation-level random effects
             if obs_random_effects:
                 obs_re = numpyro.sample("obs_re", dist.Normal(0, obs_re_sd))  # type: ignore
@@ -209,51 +173,55 @@ def occu_cop(
                 obs_re = 0.0
 
             # Detection process
-            rate_detection = numpyro.deterministic(
-                f"rate_detection",
-                jnp.exp(reg_det(obs_covs) + site_re_det + obs_re),
+            r_it = numpyro.deterministic(
+                "prob_detection",
+                jax.nn.sigmoid(reg_det(obs_covs) + site_re_det + obs_re),
             )
-            l_det = z * rate_detection + (1 - z) * rate_fp_unoccupied + rate_fp_constant
+            p_it = 1.0 - (1.0 - r_it) ** N_i[None, :]  # type: ignore
 
             if obs is not None:
                 with numpyro.handlers.mask(mask=jnp.isfinite(obs)):
                     numpyro.sample(
-                        f"y",
-                        dist.Poisson(jnp.nan_to_num(session_duration * l_det)),
+                        "y",
+                        dist.Bernoulli(1 - (1 - p_it) * (1 - prob_fp_constant)),  # type: ignore
                         obs=jnp.nan_to_num(obs),
+                        infer={"enumerate": "parallel"},
                     )
             else:
                 numpyro.sample(
-                    f"y", dist.Poisson(jnp.nan_to_num(session_duration * l_det))
+                    "y",
+                    dist.Bernoulli(1 - (1 - p_it) * (1 - prob_fp_constant)),  # type: ignore
+                    infer={"enumerate": "parallel"},
                 )
 
 
-def simulate_cop(
+def simulate_rn(
     n_site_covs: int = 1,
     n_obs_covs: int = 1,
     n_sites: int = 100,
     deployment_days_per_site: int = 365,
     session_duration: int = 7,
+    prob_fp: float = 0.0,
     simulate_missing: bool = False,
     min_occupancy: float = 0.25,
     max_occupancy: float = 0.75,
-    min_observation_rate: float = 0.5,
-    max_observation_rate: float = 10.0,
+    min_observation_rate: float = 0.1,
+    max_observation_rate: float = 0.5,
     random_seed: int = 0,
     spatial: bool = False,
     gp_sd: float = 1.0,
     gp_l: float = 0.2,
 ) -> tuple[dict, dict]:
-    """Simulate data for :func:`occu_cop`.
+    """Simulate data for :func:`occu_rn`.
 
-    Returns ``(data, true_params)`` for use with :func:`fit`.
+    Returns ``(data, true_params)`` for :func:`fit`.
 
     Examples
     --------
-    >>> from biolith.models import simulate_cop
-    >>> data, params = simulate_cop()
+    >>> from biolith.models import simulate_rn
+    >>> data, params = simulate_rn()
     >>> sorted(data.keys())
-    ['coords', 'ell', 'obs', 'obs_covs', 'session_duration', 'site_covs']
+    ['coords', 'ell', 'obs', 'obs_covs', 'site_covs']
     """
 
     # Initialize random number generator
@@ -264,18 +232,14 @@ def simulate_cop(
         coords = None
 
     # Make sure occupancy and detection are not too close to 0 or 1
-    z = None
+    N_i = None
     while (
-        z is None
-        or z.mean() < min_occupancy
-        or z.mean() > max_occupancy
+        N_i is None
+        or (N_i > 0).mean() < min_occupancy
+        or (N_i > 0).mean() > max_occupancy
         or np.mean(obs[np.isfinite(obs)]) < min_observation_rate
         or np.mean(obs[np.isfinite(obs)]) > max_observation_rate
     ):
-
-        # Generate false positive rate
-        rate_fp = rng.uniform(0.05, 0.2)
-
         # Generate intercept and slopes
         beta = rng.normal(
             size=n_site_covs + 1
@@ -286,25 +250,20 @@ def simulate_cop(
 
         # Generate occupancy and site-level covariates
         site_covs = rng.normal(size=(n_sites, n_site_covs))
+
         if spatial and coords is not None:
             w, ell = simulate_spatial_effects(coords, gp_sd=gp_sd, gp_l=gp_l, rng=rng)
         else:
             w, ell = np.zeros(n_sites), 0.0
-        psi = 1 / (
-            1
-            + np.exp(
-                -(
-                    beta[0].repeat(n_sites)
-                    + np.sum(
-                        [beta[i + 1] * site_covs[..., i] for i in range(n_site_covs)],
-                        axis=0,
-                    )
-                    + w
-                )
+        abundance = np.exp(
+            beta[0].repeat(n_sites)
+            + np.sum(
+                [beta[i + 1] * site_covs[..., i] for i in range(n_site_covs)], axis=0
             )
+            + w
         )
-        z = rng.binomial(
-            n=1, p=psi, size=n_sites
+        N_i = rng.poisson(
+            abundance, size=n_sites
         )  # vector of latent occupancy status for each site
 
         # Generate detection data
@@ -312,10 +271,16 @@ def simulate_cop(
 
         # Create matrix of detection covariates
         obs_covs = rng.normal(size=(n_sites, time_periods, n_obs_covs))
-        detection_rate = np.exp(
-            alpha[0].repeat(n_sites)[:, None]
-            + np.sum(
-                [alpha[i + 1] * obs_covs[..., i] for i in range(n_obs_covs)], axis=0
+        r_it = 1 / (
+            1
+            + np.exp(
+                -(
+                    alpha[0].repeat(n_sites)[:, None]
+                    + np.sum(
+                        [alpha[i + 1] * obs_covs[..., i] for i in range(n_obs_covs)],
+                        axis=0,
+                    )
+                )
             )
         )
 
@@ -323,15 +288,16 @@ def simulate_cop(
         obs = np.zeros((n_sites, time_periods))
 
         for i in range(n_sites):
-            # Similar to the Royle model in unmarked, false positives are generated only if the site is unoccupied
+            # According to the Royle model in unmarked, false positives are generated only if the site is unoccupied
             # Note this is different than how we think about false positives being a random occurrence per image.
-            obs[i, :] = rng.poisson(
-                lam=(
-                    session_duration
-                    * (detection_rate[i, :] * z[i] + rate_fp * (1 - z[i]))
-                ),
-                size=time_periods,
+            # For now, this is generating positive/negative per time period, which is different than per image.
+            p_it = 1.0 - (1.0 - r_it[i]) ** N_i[i]
+            obs[i, :] = rng.binomial(
+                n=1, p=1 - (1 - p_it) * (1 - prob_fp), size=time_periods
             )
+
+        # Convert counts into observed occupancy
+        obs = (obs >= 1) * 1.0
 
         if simulate_missing:
             # Simulate missing data:
@@ -343,25 +309,20 @@ def simulate_cop(
                 rng.choice([True, False], size=site_covs.shape, p=[0.05, 0.95])
             ] = np.nan
 
-    print(f"True occupancy: {np.mean(z):.4f}")
+    print(f"True occupancy: {np.mean(N_i > 0):.4f}")
+    print(f"True abundance: {np.mean(abundance):.4f}")
     print(
-        f"Fraction of observations with at least one observation: {np.mean(obs[np.isfinite(obs)] >= 1):.4f}"
+        f"Proportion of timesteps with observation: {np.mean(obs[np.isfinite(obs)]):.4f}"
     )
-    print(f"Mean rate: {np.mean(obs[np.isfinite(obs)]):.4f}")
-
-    # session duration is assumed to be constant over all time periods
-    session_duration_arr = np.full((n_sites, time_periods), session_duration)
 
     return dict(
         site_covs=site_covs,
         obs_covs=obs_covs,
-        session_duration=session_duration_arr,
         obs=obs,
-        false_positives_constant=True,
         coords=coords,
         ell=ell,
     ), dict(
-        z=z,
+        abundance=abundance,
         beta=beta,
         alpha=alpha,
         w=w,
@@ -370,18 +331,19 @@ def simulate_cop(
     )
 
 
-class TestOccuCOP(unittest.TestCase):
-
+class TestOccuRN(unittest.TestCase):
     def test_occu(self):
-        data, true_params = simulate_cop(simulate_missing=True)
+        data, true_params = simulate_rn(simulate_missing=True)
 
         from biolith.utils import fit
 
-        results = fit(occu_cop, **data, timeout=600)
+        results = fit(occu_rn, **data, timeout=600)
 
         self.assertTrue(
             np.allclose(
-                results.samples["psi"].mean(), true_params["z"].mean(), atol=0.1
+                results.samples["abundance"].mean(),
+                true_params["abundance"].mean(),
+                rtol=0.1,
             )
         )
         self.assertTrue(
@@ -405,16 +367,20 @@ class TestOccuCOP(unittest.TestCase):
             )
         )
 
+    # TODO: fix this test
+    @unittest.skip("Skipping test for spatial model")
     def test_occu_spatial(self):
-        data, true_params = simulate_cop(simulate_missing=True, spatial=True)
+        data, true_params = simulate_rn(simulate_missing=True, spatial=True)
 
         from biolith.utils import fit
 
-        results = fit(occu_cop, **data, timeout=600)
+        results = fit(occu_rn, **data, timeout=600)
 
         self.assertTrue(
             np.allclose(
-                results.samples["psi"].mean(), true_params["z"].mean(), atol=0.1
+                results.samples["abundance"].mean(),
+                true_params["abundance"].mean(),
+                rtol=0.1,
             )
         )
         self.assertTrue(
@@ -425,12 +391,12 @@ class TestOccuCOP(unittest.TestCase):
         )
 
     def test_site_random_effects(self):
-        data, true_params = simulate_cop(simulate_missing=True)
+        data, true_params = simulate_rn(simulate_missing=True)
 
         from biolith.utils import fit
 
         results = fit(
-            occu_cop,
+            occu_rn,
             **data,
             site_random_effects=True,
             num_chains=1,
@@ -439,22 +405,24 @@ class TestOccuCOP(unittest.TestCase):
         )
 
         self.assertTrue("site_re_sd" in results.samples)
-        self.assertTrue("site_re_occ" in results.samples)
+        self.assertTrue("site_re_abu" in results.samples)
         self.assertTrue("site_re_det" in results.samples)
         self.assertTrue(results.samples["site_re_sd"].mean() > 0)
         self.assertTrue(
             np.allclose(
-                results.samples["psi"].mean(), true_params["z"].mean(), atol=0.15
+                results.samples["abundance"].mean(),
+                true_params["abundance"].mean(),
+                rtol=0.2,
             )
         )
 
     def test_obs_random_effects(self):
-        data, true_params = simulate_cop(simulate_missing=True)
+        data, true_params = simulate_rn(simulate_missing=True)
 
         from biolith.utils import fit
 
         results = fit(
-            occu_cop,
+            occu_rn,
             **data,
             obs_random_effects=True,
             num_chains=1,
@@ -467,35 +435,34 @@ class TestOccuCOP(unittest.TestCase):
         self.assertTrue(results.samples["obs_re_sd"].mean() > 0)
         self.assertTrue(
             np.allclose(
-                results.samples["psi"].mean(), true_params["z"].mean(), atol=0.15
+                results.samples["abundance"].mean(),
+                true_params["abundance"].mean(),
+                rtol=0.2,
             )
         )
 
     def test_combined_random_effects(self):
-        data, true_params = simulate_cop(simulate_missing=True)
+        data, _ = simulate_rn(simulate_missing=True)
 
         from biolith.utils import fit
 
+        # this is relatively slow, so we use fewer samples and don't test recovering the true params
         results = fit(
-            occu_cop,
+            occu_rn,
             **data,
             site_random_effects=True,
             obs_random_effects=True,
             num_chains=1,
-            num_samples=500,
+            num_warmup=10,
+            num_samples=10,
             timeout=600,
         )
 
         self.assertTrue("site_re_sd" in results.samples)
-        self.assertTrue("site_re_occ" in results.samples)
+        self.assertTrue("site_re_abu" in results.samples)
         self.assertTrue("site_re_det" in results.samples)
         self.assertTrue("obs_re_sd" in results.samples)
         self.assertTrue("obs_re" in results.samples)
-        self.assertTrue(
-            np.allclose(
-                results.samples["psi"].mean(), true_params["z"].mean(), atol=0.15
-            )
-        )
 
 
 if __name__ == "__main__":

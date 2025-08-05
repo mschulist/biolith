@@ -70,7 +70,8 @@ class BARTRegression(AbstractRegression):
         with numpyro.plate(f"{self.name}_trees", self.n_trees, dim=-2):
             with numpyro.plate(f"{self.name}_nodes", self.num_nodes, dim=-1):
                 self.leaf_values = numpyro.sample(
-                    f"{self.name}_leaf_values", dist.Normal(0, sigma_mu)  # type: ignore
+                    f"{self.name}_leaf_values",
+                    dist.Normal(0, sigma_mu),  # type: ignore
                 )
 
         depths = jnp.floor(jnp.log2(jnp.arange(1, self.num_internal_nodes + 1)))

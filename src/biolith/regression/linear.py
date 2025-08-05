@@ -43,12 +43,20 @@ class LinearRegression(AbstractRegression):
             Linear predictor of shape (n_sites,) or of shape (n_revisits, n_sites).
         """
         if covs.ndim == 2:
-            return jnp.tile(self.coef[0], (covs.shape[-1],)) + jnp.dot(  # type: ignore
-                self.coef[1:], covs  # type: ignore
+            return (
+                jnp.tile(self.coef[0], (covs.shape[-1],))
+                + jnp.dot(  # type: ignore
+                    self.coef[1:],
+                    covs,  # type: ignore
+                )
             )
         elif covs.ndim == 3:
-            return jnp.tile(self.coef[0], (covs.shape[1], covs.shape[2])) + jnp.sum(  # type: ignore
-                self.coef[1:, None, None] * covs, axis=0  # type: ignore
+            return (
+                jnp.tile(self.coef[0], (covs.shape[1], covs.shape[2]))
+                + jnp.sum(  # type: ignore
+                    self.coef[1:, None, None] * covs,
+                    axis=0,  # type: ignore
+                )
             )
         else:
             raise ValueError(

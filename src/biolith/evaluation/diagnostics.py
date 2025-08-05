@@ -6,10 +6,8 @@ from numpyro.infer import MCMC
 
 
 def diagnostics(mcmc: MCMC, exclude_deterministic=True):
-
     sites = mcmc._states[mcmc._sample_field]  # type: ignore
     if isinstance(sites, dict) and exclude_deterministic:
-
         state_sample_field = attrgetter(mcmc._sample_field)(mcmc._last_state)
         # adapted from NumPyro's summary code
         if isinstance(state_sample_field, dict):

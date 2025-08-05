@@ -8,7 +8,6 @@ import pandas as pd
 def dataframes_to_arrays(
     site_covs=None, obs_covs=None, obs=None, session_duration=None
 ):
-
     site_covs_names = None
     obs_covs_names = None
     if isinstance(site_covs, pd.DataFrame):
@@ -18,9 +17,9 @@ def dataframes_to_arrays(
         if not isinstance(obs_covs.columns, pd.MultiIndex):
             obs_covs = obs_covs.sort_index().to_numpy()
         else:
-            assert (
-                len(obs_covs.columns.levels) == 2
-            ), "obs_covs with MultiIndex columns must have columns of exactly two levels"
+            assert len(obs_covs.columns.levels) == 2, (
+                "obs_covs with MultiIndex columns must have columns of exactly two levels"
+            )
             obs_covs_names = ["intercept"] + [c for c in obs_covs.columns.levels[0]]
             obs_covs = (
                 obs_covs.sort_index()

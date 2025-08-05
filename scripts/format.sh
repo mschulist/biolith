@@ -1,7 +1,8 @@
 #!/bin/sh
-# Format Python code using isort, docformatter and black
+# Format Python code using ruff
 
 set -e
-isort --profile black biolith
-docformatter --black --in-place -r biolith
-black biolith
+
+# too many errors...
+# uv run ruff check --fix src/biolith
+uv run ruff format src/biolith

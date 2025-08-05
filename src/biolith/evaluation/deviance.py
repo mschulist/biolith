@@ -129,7 +129,6 @@ def deviance_manual(
 
 
 class TestDeviance(unittest.TestCase):
-
     # TODO: Fix the disparity between the NumPyro and manual deviance calculation.
     @unittest.skip("Skipping failing deviance test for now.")
     def test_deviance(self):

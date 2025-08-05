@@ -108,7 +108,6 @@ def lppd_manual(
 
 
 class TestLPPD(unittest.TestCase):
-
     def test_lppd(self):
         from biolith.models import occu, simulate
         from biolith.utils import fit, predict
