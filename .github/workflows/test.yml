@@ -35,4 +35,4 @@ jobs:
           uv add rpy2  # for comparing to R packages
       - name: Test with unittest
         run: |
-          uv run python -m unittest -vvv
+          uv run python -m unittest discover -s src -p "*.py" -v
